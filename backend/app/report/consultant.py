@@ -129,8 +129,8 @@ Analysis data:
                 else "No forecast point was produced."
             ),
             peer_benchmark=(
-                f"The peer set contains {peer_comparison.company_count} companies with "
-                f"{len(peer_comparison.sample_companies)} sample names available. "
+                f"The peer benchmark uses {peer_comparison.sample_row_count or peer_comparison.company_count} "
+                f"reference row sample(s) from {peer_comparison.company_count} sampled companies. "
                 f"{basis['peer_position']}"
             ),
             risks=_fallback_risks(quality, basis),

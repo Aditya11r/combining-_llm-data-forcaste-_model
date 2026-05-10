@@ -38,6 +38,12 @@ class ConsultantChatService:
         payload = {
             "user_question": message,
             "analysis_result": session.get("result"),
+            "analysis_flow": {
+                "yearly_kpis": "Use extracted_kpis.yearly_records for all historical years found in the PDF.",
+                "clustering": "KMeans_cluster is predicted from the latest model-input KPI values after reference-grounded imputation.",
+                "peer_benchmark": "peer_comparison averages and peer_forecast come from a 50-100 row same-cluster reference sample when available.",
+                "company_forecast": "forecast comes from the LSTM model using the PDF KPI values and the assigned cluster/peer_group.",
+            },
             "prior_chat": session.get("chat_messages", [])[-8:],
             "pdf_context_excerpt": (session.get("context") or {}).get("text", "")[:12000],
         }

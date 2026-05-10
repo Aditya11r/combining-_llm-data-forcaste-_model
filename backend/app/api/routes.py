@@ -9,34 +9,29 @@ from fastapi.responses import HTMLResponse, Response
 
 from app.config import get_settings
 from app.data.peer_store import PeerStore
+from app.data.store_factory import build_peer_store
 from app.extraction.kpi_extractor import KpiExtractor, score_extraction
+from app.imputation.kpi_imputer import ReferenceGroundedKpiImputer
 from app.models.clustering import ClusteringService
 from app.models.forecasting import ForecastingService
+from app.parser.document_classifier import brsr_rejection_message, validate_brsr_document
 from app.parser.pdf_context import prepare_pdf_context
 from app.report.chart_builder import build_charts
 from app.report.chat import ConsultantChatService, make_chat_message
 from app.report.consultant import ConsultantReporter
 from app.report.exporter import build_report_html, build_simple_pdf
-from app.schemas import AnalysisResponse, ChatRequest, ChatResponse, HealthResponse, YearlyKpiRecord
+from app.schemas import AnalysisResponse, ChatRequest, ChatResponse, HealthResponse
 from app.sessions.store import SessionStore
 
 router = APIRouter()
 
 
-NUMERIC_KPI_FIELDS = [
-    "scope1_tco2e",
-    "scope2_tco2e",
-    "water_consumption_kl",
-    "waste_generated_tonnes",
-    "waste_recycled_tonnes",
-    "total_scope1_scope2_tco2e",
-]
-
-
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     settings = get_settings()
-    peer_store = PeerStore(settings)
+    csv_store = PeerStore(settings)
+    peer_store = build_peer_store(settings)
+    reference_data_source = _store_source(peer_store)
     model_paths_ready = all(
         path.exists()
         for path in [
@@ -51,7 +46,9 @@ def health() -> HealthResponse:
         status="ok",
         openrouter_configured=bool(settings.openrouter_api_key),
         parser_mode="old_parser" if settings.old_parser_module else "pypdf_fallback",
-        csv_database_ready=peer_store.ready(),
+        csv_database_ready=csv_store.ready() or peer_store.ready(),
+        peer_database_ready=reference_data_source == "mongodb",
+        reference_data_source=reference_data_source,
         model_paths_ready=model_paths_ready,
     )
 
@@ -99,6 +96,17 @@ async def analyze_pdf(
             },
         )
 
+        document_validation = await validate_brsr_document(prepared.context, settings=settings)
+        if not document_validation.accepted:
+            store.append_event(session, "document_rejected", document_validation.to_dict())
+            try:
+                store.delete(session["session_id"])
+            except Exception:
+                pass
+            raise HTTPException(status_code=422, detail=brsr_rejection_message(document_validation))
+
+        store.append_event(session, "document_validated", document_validation.to_dict())
+
         extractor = KpiExtractor(settings)
         extracted, quality, raw_extraction = await extractor.extract(
             context=prepared.context,
@@ -108,16 +116,33 @@ async def analyze_pdf(
         )
         store.append_event(session, "kpis_extracted", {"raw": raw_extraction, "validated": extracted.model_dump()})
 
-        peer_store = PeerStore(settings)
-        csv_records = peer_store.company_records(extracted.company_name)
-        filled_fields = _fill_extracted_from_csv_records(extracted, csv_records, prepared.target_years)
-        if filled_fields:
-            extracted.warnings.append("Some KPI values were filled from CSV fallback because PDF extraction missed them.")
-            extracted.evidence["csv_fallback"] = "cluster_forecast.csv company-year match"
+        peer_store = build_peer_store(settings)
+        reference_source = _store_source(peer_store)
+        imputation = await ReferenceGroundedKpiImputer(settings, peer_store).impute(
+            extracted,
+            context=prepared.context,
+        )
+        if imputation.imputed_fields:
+            source = (
+                f"LLM + {reference_source} reference statistics"
+                if imputation.used_llm
+                else f"{reference_source} reference statistics"
+            )
+            extracted.warnings.append(
+                f"Missing model-input KPI values were estimated from {source}; review imputed_fields before relying on model outputs."
+            )
+            extracted.evidence["reference_grounded_imputation"] = source
             quality = score_extraction(extracted)
             quality.notes.append(
-                "Filled missing KPI fields from the current CSV database across available years: "
-                + ", ".join(sorted(filled_fields))
+                "Estimated missing model-input fields: "
+                + ", ".join(
+                    sorted(
+                        {
+                            f"{field.fiscal_year_start or 'latest'}.{field.field}"
+                            for field in imputation.imputed_fields
+                        }
+                    )
+                )
             )
 
         clustering = ClusteringService(settings, peer_store)
@@ -128,7 +153,7 @@ async def analyze_pdf(
             quality.notes.append(f"Clustering model fallback used: {exc}")
 
         forecasting_inputs = extracted.to_forecasting_inputs(peer_group=cluster.peer_group)
-        peer_comparison = peer_store.peer_comparison(cluster.peer_group)
+        peer_comparison = peer_store.peer_comparison(cluster.peer_group, extracted=extracted, sample_size=100)
         try:
             forecast = ForecastingService(settings).forecast(forecasting_inputs)
         except Exception as exc:
@@ -267,106 +292,7 @@ def safe_filename(filename: str) -> str:
     return "".join(allowed) or "report.pdf"
 
 
-def _safe_float(value: str | None) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-
-def _safe_int(value: str | None) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(float(value))
-    except ValueError:
-        return None
-
-
-def _fill_extracted_from_csv_records(extracted, csv_records: list[dict[str, str]], target_years: list[str]) -> set[str]:
-    if not csv_records:
-        return set()
-
-    target_year_starts = {_fiscal_year_start_from_label(year) for year in target_years}
-    target_year_starts.discard(None)
-    existing_years = {record.fiscal_year_start for record in extracted.yearly_records if record.fiscal_year_start}
-    wanted_years = existing_years or target_year_starts
-    if not wanted_years:
-        wanted_years = {_safe_int(row.get("fiscal_year_start")) for row in csv_records if _safe_int(row.get("fiscal_year_start"))}
-
-    rows_by_year = {
-        _safe_int(row.get("fiscal_year_start")): row
-        for row in csv_records
-        if _safe_int(row.get("fiscal_year_start")) is not None
-    }
-
-    filled_fields: set[str] = set()
-    for year in sorted(wanted_years):
-        if year not in rows_by_year:
-            continue
-        record = _yearly_record_for(extracted, year)
-        row = rows_by_year[year]
-
-        if record.fiscal_year is None:
-            record.fiscal_year = row.get("fiscal_year")
-
-        for field in NUMERIC_KPI_FIELDS:
-            if getattr(record, field) is None:
-                value = _safe_float(row.get(field))
-                if value is not None:
-                    setattr(record, field, value)
-                    filled_fields.add(f"yearly_records.{year}.{field}")
-
-    latest_csv = max(
-        [row for row in csv_records if _safe_int(row.get("fiscal_year_start")) is not None],
-        key=lambda row: _safe_int(row.get("fiscal_year_start")) or 0,
-        default=None,
-    )
-    if latest_csv:
-        if extracted.fiscal_year is None:
-            extracted.fiscal_year = latest_csv.get("fiscal_year")
-        if extracted.fiscal_year_start is None:
-            extracted.fiscal_year_start = _safe_int(latest_csv.get("fiscal_year_start"))
-
-    if extracted.fiscal_year_start:
-        latest = _yearly_record_for(extracted, extracted.fiscal_year_start)
-        for field in NUMERIC_KPI_FIELDS:
-            if getattr(extracted, field) is None and getattr(latest, field) is not None:
-                setattr(extracted, field, getattr(latest, field))
-                filled_fields.add(field)
-
-    extracted.yearly_records = sorted(
-        extracted.yearly_records,
-        key=lambda record: record.fiscal_year_start or 0,
-    )
-    return filled_fields
-
-
-def _yearly_record_for(extracted, fiscal_year_start: int):
-    latest = None
-    for record in extracted.yearly_records:
-        if record.fiscal_year_start == fiscal_year_start:
-            latest = record
-            break
-
-    if latest is None:
-        latest = YearlyKpiRecord(
-            fiscal_year=f"FY {fiscal_year_start}-{str(fiscal_year_start + 1)[-2:]}",
-            fiscal_year_start=fiscal_year_start,
-        )
-        extracted.yearly_records.append(latest)
-
-    return latest
-
-
-def _fiscal_year_start_from_label(value: str | None) -> int | None:
-    if not value:
-        return None
-    import re
-
-    match = re.search(r"(20\d{2})", value)
-    if not match:
-        return None
-    return int(match.group(1))
+def _store_source(store) -> str:
+    if store.__class__.__name__ == "MongoPeerStore":
+        return "mongodb"
+    return "csv"

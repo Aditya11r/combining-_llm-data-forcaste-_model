@@ -50,6 +50,7 @@ const ANALYSIS_STEPS = [
 export default function App() {
   const [health, setHealth] = useState(null);
   const [sessions, setSessions] = useState([]);
+  const [sessionsCollapsed, setSessionsCollapsed] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [activeThread, setActiveThread] = useState(null);
   const [result, setResult] = useState(null);
@@ -62,8 +63,11 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const [chatDraft, setChatDraft] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
+  const [chatWidth, setChatWidth] = useState(300);
   const [error, setError] = useState('');
   const fileInputRef = useRef(null);
+  const chatInputRef = useRef(null);
+  const shellRef = useRef(null);
 
   useEffect(() => {
     refreshSystem();
@@ -82,6 +86,10 @@ export default function App() {
     setBenchmarkZoom(null);
     setTrendZoom(null);
   }, [result?.session_id]);
+
+  useEffect(() => {
+    resizeChatInput();
+  }, [chatDraft, result?.session_id]);
 
   async function refreshSystem() {
     const [healthPayload, sessionPayload] = await Promise.all([
@@ -198,6 +206,39 @@ export default function App() {
     }
   }
 
+  function resizeChatInput() {
+    const input = chatInputRef.current;
+    if (!input) return;
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 132)}px`;
+  }
+
+  function handleResizeStart(event) {
+    event.preventDefault();
+    const shell = shellRef.current;
+    if (!shell) return;
+
+    function handleMove(moveEvent) {
+      const rect = shell.getBoundingClientRect();
+      const leftReserve = sessionsCollapsed ? 0 : 250;
+      const minMainWidth = 620;
+      const minChatWidth = 280;
+      const maxChatWidth = Math.min(560, rect.width - leftReserve - minMainWidth);
+      const nextWidth = clamp(rect.right - moveEvent.clientX, minChatWidth, Math.max(minChatWidth, maxChatWidth));
+      setChatWidth(nextWidth);
+    }
+
+    function handleUp() {
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+      document.body.classList.remove('resizing-chat');
+    }
+
+    document.body.classList.add('resizing-chat');
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp);
+  }
+
   const forecastRows = useMemo(() => {
     const rows = result?.charts?.emissions_forecast || [];
     return normalizeChartRows(rows);
@@ -245,7 +286,16 @@ export default function App() {
 
   return (
     <main className="app-canvas">
-      <section className="product-shell">
+      <section
+        ref={shellRef}
+        className={`product-shell ${sessionsCollapsed ? 'sessions-collapsed' : ''}`}
+        style={{ '--chat-width': `${chatWidth}px` }}
+      >
+        {sessionsCollapsed && (
+          <button className="sessions-floating-toggle" onClick={() => setSessionsCollapsed(false)}>
+            Threads
+          </button>
+        )}
         <aside className="left-panel">
           <div className="panel-brand">
             <div className="brand-mark">E</div>
@@ -253,6 +303,9 @@ export default function App() {
               <strong>ESG Intelligence</strong>
               <span>Analysis threads</span>
             </div>
+            <button className="mini-icon collapse-panel" onClick={() => setSessionsCollapsed(true)} aria-label="Hide sessions">
+              Hide
+            </button>
           </div>
 
           <section className="side-section">
@@ -264,9 +317,15 @@ export default function App() {
             </div>
             <div className="recent-list">
               {sessions.length === 0 && <p className="quiet">No threads yet</p>}
-              {sessions.slice(0, 7).map((session) => (
-                <div key={session.session_id} className="recent-item">
-                  <button className="recent-open" onClick={() => loadThread(session.session_id)}>
+              {sessions.slice(0, 7).map((session) => {
+                const isActive = activeThread?.session_id === session.session_id;
+                return (
+                <div key={session.session_id} className={`recent-item ${isActive ? 'active' : ''}`}>
+                  <button
+                    className="recent-open"
+                    onClick={() => loadThread(session.session_id)}
+                    aria-current={isActive ? 'true' : undefined}
+                  >
                     <span>{session.company_name || session.filename}</span>
                     <small>{session.quality_level || 'open'}</small>
                   </button>
@@ -278,7 +337,8 @@ export default function App() {
                     <Trash2 size={13} />
                   </button>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </section>
 
@@ -310,10 +370,16 @@ export default function App() {
                 <span>{quality}</span>
               </div>
               {result && (
-                <a className="save-report" href={absoluteApiUrl(result.downloads.pdf)}>
-                  <Download size={15} />
-                  <span>Save Report</span>
-                </a>
+                <>
+                  <a className="save-report" href={absoluteApiUrl(result.downloads.html)} target="_blank" rel="noreferrer">
+                    <Download size={15} />
+                    <span>Open Chart Report</span>
+                  </a>
+                  <a className="view-button" href={absoluteApiUrl(result.downloads.pdf)}>
+                    <Download size={14} />
+                    <span>PDF</span>
+                  </a>
+                </>
               )}
             </div>
           </header>
@@ -335,6 +401,7 @@ export default function App() {
             </div>
             <button className="run-button" disabled={!selectedFile || busy}>
               {busy ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
+              <span>{busy ? 'Analyzing' : 'Start Analyzer'}</span>
             </button>
           </form>
 
@@ -357,6 +424,8 @@ export default function App() {
               <Chip label="Source" value={sourceName} />
               <Chip label="Metric" value="Scope 1 + 2" />
               <Chip label="KMeans cluster" value={result?.cluster?.KMeans_cluster ?? 'pending'} />
+              <Chip label="Cluster confidence" value={result?.cluster?.confidence || 'pending'} />
+              <Chip label="Peer sample" value={result?.peer_comparison?.sample_row_count ? `${result.peer_comparison.sample_row_count} rows` : 'pending'} />
               <Chip label="Years" value={yearsLabel} />
               <Chip label="Company" value={companyName} />
           </div>
@@ -375,7 +444,7 @@ export default function App() {
               trendRows={trendRows}
               kpiRows={kpiRows}
               kpiIsEmpty={kpiIsEmpty}
-              usedCsvFallback={Boolean(result?.extracted_kpis?.evidence?.csv_fallback)}
+              imputationCount={result?.extracted_kpis?.imputed_fields?.length || 0}
             />
             <ClusterPeerBenchmarkCard
               hasData={hasBenchmarkChart}
@@ -384,6 +453,7 @@ export default function App() {
               zoom={benchmarkZoom}
               setZoom={setBenchmarkZoom}
               clusterId={result?.cluster?.KMeans_cluster}
+              peerSampleSize={result?.peer_comparison?.sample_row_count}
             />
             <YearlyKpiTrendsCard
               hasData={hasTrendChart}
@@ -395,6 +465,13 @@ export default function App() {
             />
           </section>
         </section>
+
+        <div
+          className="resize-divider"
+          role="separator"
+          aria-label="Resize dashboard and chat panels"
+          onPointerDown={handleResizeStart}
+        />
 
         <aside className="thread-panel">
           <div className="thread-header">
@@ -450,9 +527,18 @@ export default function App() {
             ))}
           </div>
           <form className="chat-form" onSubmit={handleChatSubmit}>
-            <input
+            <textarea
+              ref={chatInputRef}
               value={chatDraft}
+              rows={1}
               onChange={(event) => setChatDraft(event.target.value)}
+              onInput={resizeChatInput}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault();
+                  handleChatSubmit(event);
+                }
+              }}
               disabled={!result || chatBusy}
               placeholder={result ? 'Ask the ESG consultant...' : 'Generate a report first'}
             />
@@ -529,7 +615,7 @@ function EmissionsForecastCard({ hasData, rows, rawRowCount, zoom, setZoom, resu
         onDoubleClick={() => setZoom(null)}
       >
         {hasData ? (
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height="100%">
             <LineChart data={rows}>
               <CartesianGrid stroke="#edf0f2" vertical={false} />
               <XAxis dataKey="year" axisLine={false} tickLine={false} />
@@ -548,7 +634,7 @@ function EmissionsForecastCard({ hasData, rows, rawRowCount, zoom, setZoom, resu
   );
 }
 
-function ExtractedKpiPreviewCard({ hasYearlyKpis, trendRows, kpiRows, kpiIsEmpty, usedCsvFallback }) {
+function ExtractedKpiPreviewCard({ hasYearlyKpis, trendRows, kpiRows, kpiIsEmpty, imputationCount }) {
   return (
     <article className="chart-card kpi-card">
       <CardHeader
@@ -600,26 +686,30 @@ function ExtractedKpiPreviewCard({ hasYearlyKpis, trendRows, kpiRows, kpiIsEmpty
           Numeric KPI values were not found in the extracted context. Try the old OCR/table parser for this PDF.
         </div>
       )}
-      {usedCsvFallback && (
+      {imputationCount > 0 && (
         <div className="kpi-source-note">
-          Missing values filled from CSV company match.
+          {imputationCount} missing model-input value{imputationCount === 1 ? '' : 's'} estimated from CSV-grounded references.
         </div>
       )}
     </article>
   );
 }
 
-function ClusterPeerBenchmarkCard({ hasData, rows, rawRowCount, zoom, setZoom, clusterId }) {
+function ClusterPeerBenchmarkCard({ hasData, rows, rawRowCount, zoom, setZoom, clusterId, peerSampleSize }) {
   return (
     <article className="chart-card benchmark-card">
-      <CardHeader icon={<Users size={16} />} title="Cluster Peer Benchmark" action={`Cluster ${clusterId ?? '-'}`} />
+      <CardHeader
+        icon={<Users size={16} />}
+        title="Cluster Peer Benchmark"
+        action={peerSampleSize ? `${peerSampleSize} row sample` : `Cluster ${clusterId ?? '-'}`}
+      />
       <div
         className="chart-box small zoomable-chart"
         onWheel={(event) => handleWheelZoom(event, rawRowCount, zoom, setZoom)}
         onDoubleClick={() => setZoom(null)}
       >
         {hasData ? (
-          <ResponsiveContainer width="100%" height={260}>
+          <ResponsiveContainer width="100%" height="100%">
             <BarChart data={rows}>
               <CartesianGrid stroke="#edf0f2" vertical={false} />
               <XAxis dataKey="metric" axisLine={false} tickLine={false} />
@@ -648,7 +738,7 @@ function YearlyKpiTrendsCard({ hasData, rows, rawRowCount, zoom, setZoom, yearCo
         onDoubleClick={() => setZoom(null)}
       >
         {hasData ? (
-          <ResponsiveContainer width="100%" height={250}>
+          <ResponsiveContainer width="100%" height="100%">
             <LineChart data={rows}>
               <CartesianGrid stroke="#edf0f2" vertical={false} />
               <XAxis dataKey="year" axisLine={false} tickLine={false} />

@@ -60,6 +60,20 @@ class YearlyKpiRecord(BaseModel):
         return self.scope1_tco2e + self.scope2_tco2e
 
 
+class ImputedKpiField(BaseModel):
+    field: str
+    value: float | str
+    fiscal_year_start: int | None = None
+    confidence: Literal["low", "medium", "high"] = "medium"
+    method: Literal[
+        "llm_csv_estimate",
+        "csv_statistic_estimate",
+        "llm_reference_estimate",
+        "reference_statistic_estimate",
+    ] = "reference_statistic_estimate"
+    basis: str
+
+
 class ExtractedKpiPayload(BaseModel):
     company_name: str | None = None
     fiscal_year: str | None = None
@@ -79,6 +93,7 @@ class ExtractedKpiPayload(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     yearly_records: list[YearlyKpiRecord] = Field(default_factory=list)
+    imputed_fields: list[ImputedKpiField] = Field(default_factory=list)
 
     @computed_field
     @property
@@ -156,6 +171,8 @@ class PeerComparison(BaseModel):
     peer_group: int
     peer_group_label: str
     company_count: int
+    sample_row_count: int = 0
+    benchmark_basis: str | None = None
     sample_companies: list[str]
     averages: dict[str, float]
     peer_forecast: list[ForecastPoint]
@@ -212,6 +229,8 @@ class HealthResponse(BaseModel):
     openrouter_configured: bool
     parser_mode: str
     csv_database_ready: bool
+    peer_database_ready: bool = False
+    reference_data_source: str = "csv"
     model_paths_ready: bool
 
 

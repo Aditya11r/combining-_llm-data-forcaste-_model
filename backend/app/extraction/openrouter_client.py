@@ -52,4 +52,6 @@ class OpenRouterClient:
         content = data["choices"][0]["message"]["content"]
         if isinstance(content, dict):
             return content
+        if not content:
+            raise RuntimeError("OpenRouter returned an empty JSON response")
         return json.loads(content)

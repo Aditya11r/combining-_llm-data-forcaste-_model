@@ -30,8 +30,8 @@ def compute_source_document_id(path: Path) -> str:
 def detect_fiscal_years_from_context(context: str) -> list[str]:
     years: set[str] = set()
     patterns = [
-        r"FY\s*(20\d{2})\s*[-/]\s*(\d{2,4})",
-        r"(20\d{2})\s*[-/]\s*(\d{2,4})",
+        r"FY\s*(20\d{2})\s*[-/–—]\s*(\d{2,4})",
+        r"(20\d{2})\s*[-/–—]\s*(\d{2,4})",
     ]
 
     for pattern in patterns:

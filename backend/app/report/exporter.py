@@ -49,11 +49,46 @@ def build_report_html(result: AnalysisResponse) -> str:
     peer_rows = _html_rows(
         [(label, _fmt(value), "") for label, value in result.peer_comparison.averages.items()]
     )
+    imputed_rows = _html_rows(
+        [
+            (
+                str(field.fiscal_year_start or "Latest"),
+                field.field,
+                f"{_fmt(field.value)} | {field.confidence} | {field.method} | {field.basis}",
+            )
+            for field in extracted.imputed_fields
+        ]
+    )
+    chart_sections = "\n".join(
+        [
+            _line_chart_svg(
+                "Emissions Forecast vs Cluster Peers",
+                result.charts.emissions_forecast,
+                x_key="year",
+                series=[
+                    ("company", "Company", "#15616d"),
+                    ("peer", "Cluster peers", "#7c3aed"),
+                ],
+            ),
+            _bar_chart_svg("Cluster Peer Benchmark", result.charts.peer_benchmark),
+            _line_chart_svg(
+                "Yearly KPI Trends",
+                result.charts.kpi_trends,
+                x_key="year",
+                series=[
+                    ("total_emissions", "Total emissions", "#15616d"),
+                    ("water", "Water", "#0f766e"),
+                    ("waste_generated", "Waste generated", "#d97706"),
+                ],
+            ),
+        ]
+    )
 
     risks = "".join(f"<li>{html.escape(item)}</li>" for item in report.risks)
     recommendations = "".join(f"<li>{html.escape(item)}</li>" for item in report.recommendations)
     chart_notes = "".join(f"<li>{html.escape(item)}</li>" for item in report.chart_narratives)
-    notes = "".join(f"<li>{html.escape(item)}</li>" for item in quality.notes)
+    compact_quality = _compact_quality_summary(result)
+    notes = "".join(f"<li>{html.escape(item)}</li>" for item in compact_quality["details"])
     missing = ", ".join(quality.missing_required_fields) or "None"
     sample_companies = ", ".join(result.peer_comparison.sample_companies[:12]) or "No sample companies available"
 
@@ -72,6 +107,16 @@ def build_report_html(result: AnalysisResponse) -> str:
     .metric {{ border: 1px solid #d9e2e5; border-radius: 8px; padding: 14px; background: #fbfcfd; }}
     .label {{ font-size: 12px; color: #52616b; text-transform: uppercase; }}
     .value {{ font-size: 22px; font-weight: 700; }}
+    .chart-grid {{ display: grid; grid-template-columns: 1fr; gap: 18px; margin: 18px 0; }}
+    .chart-panel {{ border: 1px solid #d9e2e5; border-radius: 8px; padding: 14px; background: #fbfcfd; }}
+    .chart-title {{ font-size: 14px; font-weight: 700; margin-bottom: 10px; color: #102a43; }}
+    .legend {{ display: flex; flex-wrap: wrap; gap: 12px; color: #52616b; font-size: 12px; margin-top: 8px; }}
+    .legend span {{ display: inline-flex; align-items: center; gap: 5px; }}
+    .swatch {{ width: 10px; height: 10px; border-radius: 2px; display: inline-block; }}
+    details.quality-details {{ margin-top: 12px; color: #52616b; }}
+    details.quality-details summary {{ cursor: pointer; font-size: 13px; font-weight: 700; }}
+    .quality-compact {{ display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }}
+    .quality-pill {{ border: 1px solid #d9e2e5; border-radius: 999px; padding: 5px 10px; color: #52616b; font-size: 12px; background: #fbfcfd; }}
     table {{ width: 100%; border-collapse: collapse; margin: 12px 0; }}
     th, td {{ border-bottom: 1px solid #e7eaee; text-align: left; padding: 10px 8px; font-size: 14px; }}
     th {{ color: #52616b; font-size: 12px; text-transform: uppercase; }}
@@ -92,10 +137,14 @@ def build_report_html(result: AnalysisResponse) -> str:
   <p class="meta"><strong>Years analyzed:</strong> {html.escape(years_label)}</p>
   <h2>Executive Summary</h2>
   <p>{html.escape(report.executive_summary)}</p>
+  <h2>Charts</h2>
+  <div class="chart-grid">{chart_sections}</div>
   <h2>Latest KPI Snapshot</h2>
   <table><thead><tr><th>Metric</th><th>Value</th><th>Unit / Source</th></tr></thead><tbody>{kpi_rows}</tbody></table>
   <h2>Multi-Year KPI Trend Inputs</h2>
   <table><thead><tr><th>Year</th><th>Scope 1</th><th>Scope 2</th><th>Total Scope 1 + 2</th><th>Water</th><th>Waste Generated</th><th>Waste Recycled</th></tr></thead><tbody>{yearly_rows}</tbody></table>
+  <h2>Estimated Missing KPI Values</h2>
+  <table><thead><tr><th>Year</th><th>Field</th><th>Value / Confidence / Basis</th></tr></thead><tbody>{imputed_rows}</tbody></table>
   <h2>Cluster Interpretation</h2>
   <p>{html.escape(report.cluster_interpretation)}</p>
   <p><strong>{html.escape(cluster.KMeans_cluster_label)}</strong></p>
@@ -104,6 +153,7 @@ def build_report_html(result: AnalysisResponse) -> str:
   <table><thead><tr><th>Year</th><th>Total Scope 1 + 2</th><th>Source</th></tr></thead><tbody>{forecast_rows}</tbody></table>
   <h2>Peer Benchmark</h2>
   <p>{html.escape(report.peer_benchmark)}</p>
+  <p class="meta">{html.escape(result.peer_comparison.benchmark_basis or "")}</p>
   <p><strong>Sample peer companies:</strong> {html.escape(sample_companies)}</p>
   <table><thead><tr><th>Peer metric</th><th>Average</th><th></th></tr></thead><tbody>{peer_rows}</tbody></table>
   <h2>Chart Reading Notes</h2>
@@ -113,10 +163,13 @@ def build_report_html(result: AnalysisResponse) -> str:
   <h2>Evidence-Based Recommendations</h2>
   <ul>{recommendations}</ul>
   <h2>Extraction Quality</h2>
-  <p class="note"><strong>Missing required fields:</strong> {html.escape(missing)}</p>
-  <ul>{notes}</ul>
-  <h2>Confidence Note</h2>
-  <p>{html.escape(report.confidence_note)}</p>
+  <p class="note">{html.escape(compact_quality["summary"])}</p>
+  <div class="quality-compact">
+    <span class="quality-pill">Missing: {html.escape(missing)}</span>
+    <span class="quality-pill">Imputed fields: {compact_quality["imputed_count"]}</span>
+    <span class="quality-pill">Yearly records: {compact_quality["year_count"]}</span>
+  </div>
+  <details class="quality-details"><summary>Show technical extraction notes</summary><ul>{notes}</ul></details>
 </main>
 </body>
 </html>"""
@@ -164,6 +217,13 @@ def build_simple_pdf(result: AnalysisResponse) -> bytes:
             for record in extracted.yearly_records
         ],
         "",
+        "Estimated Missing KPI Values",
+        *[
+            f"{field.fiscal_year_start or 'Latest'} {field.field}: {_fmt(field.value)} "
+            f"({field.confidence}, {field.method}) - {field.basis}"
+            for field in extracted.imputed_fields
+        ],
+        "",
         "Cluster Interpretation",
         report.cluster_interpretation,
         "",
@@ -173,6 +233,7 @@ def build_simple_pdf(result: AnalysisResponse) -> bytes:
         "",
         "Peer Benchmark",
         report.peer_benchmark,
+        result.peer_comparison.benchmark_basis or "",
         f"Sample peers: {', '.join(result.peer_comparison.sample_companies[:8]) or 'None available'}",
         *[f"{key}: {_fmt(value)}" for key, value in result.peer_comparison.averages.items()],
         "",
@@ -185,12 +246,9 @@ def build_simple_pdf(result: AnalysisResponse) -> bytes:
         "Evidence-Based Recommendations",
         *[f"- {item}" for item in report.recommendations],
         "",
-        "Extraction Quality Notes",
+        "Extraction Quality",
+        _compact_quality_summary(result)["summary"],
         f"Missing required fields: {', '.join(quality.missing_required_fields) or 'None'}",
-        *[f"- {item}" for item in quality.notes],
-        "",
-        "Confidence Note",
-        report.confidence_note,
     ]
     wrapped = []
     for line in lines:
@@ -265,6 +323,194 @@ def _fmt(value) -> str:
     if isinstance(value, (int, float)):
         return f"{value:,.2f}"
     return str(value)
+
+
+def _compact_quality_summary(result: AnalysisResponse) -> dict:
+    quality = result.extraction_quality
+    extracted = result.extracted_kpis
+    imputed_count = len(extracted.imputed_fields)
+    year_count = len(extracted.yearly_records)
+    missing = ", ".join(quality.missing_required_fields) or "none"
+    summary = (
+        f"Extraction quality: {quality.level} ({quality.score}). "
+        f"Missing required fields: {missing}. "
+        f"{imputed_count} model-input field(s) estimated; {year_count} yearly KPI record(s) used."
+    )
+    details = _dedupe_notes(quality.notes)
+    return {
+        "summary": summary,
+        "details": details or ["No additional extraction notes."],
+        "imputed_count": imputed_count,
+        "year_count": year_count,
+    }
+
+
+def _dedupe_notes(notes: list[str]) -> list[str]:
+    compacted: list[str] = []
+    seen: set[str] = set()
+    for note in notes:
+        text = str(note).strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        compacted.append(text)
+    return compacted
+
+
+def _line_chart_svg(title: str, rows: list[dict], *, x_key: str, series: list[tuple[str, str, str]]) -> str:
+    rows = rows or []
+    numeric_values = [
+        float(row[key])
+        for row in rows
+        for key, _, _ in series
+        if row.get(key) is not None
+    ]
+    if not rows or not numeric_values:
+        return _empty_chart_svg(title)
+
+    width = 920
+    height = 280
+    left = 64
+    right = 22
+    top = 22
+    bottom = 44
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    minimum = min(numeric_values)
+    maximum = max(numeric_values)
+    if minimum == maximum:
+        minimum = 0
+        maximum = maximum or 1
+
+    def x_for(index: int) -> float:
+        if len(rows) == 1:
+            return left + plot_width / 2
+        return left + (plot_width * index / (len(rows) - 1))
+
+    def y_for(value: float) -> float:
+        return top + plot_height - ((value - minimum) / (maximum - minimum) * plot_height)
+
+    polylines = []
+    points = []
+    for key, label, color in series:
+        coords = [
+            (x_for(index), y_for(float(row[key])))
+            for index, row in enumerate(rows)
+            if row.get(key) is not None
+        ]
+        if len(coords) >= 2:
+            path = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
+            polylines.append(f'<polyline fill="none" stroke="{color}" stroke-width="3" points="{path}" />')
+        for x, y in coords:
+            points.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}" />')
+
+    labels = []
+    for index, row in enumerate(rows):
+        labels.append(
+            f'<text x="{x_for(index):.1f}" y="{height - 16}" text-anchor="middle" font-size="11" fill="#52616b">{html.escape(str(row.get(x_key, "")))}</text>'
+        )
+
+    legend = _legend(series)
+    return f"""
+<div class="chart-panel">
+  <div class="chart-title">{html.escape(title)}</div>
+  <svg viewBox="0 0 {width} {height}" width="100%" height="280" role="img" aria-label="{html.escape(title)}">
+    <line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" stroke="#d9e2e5" />
+    <line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" stroke="#d9e2e5" />
+    <text x="8" y="{top + 8}" font-size="11" fill="#52616b">{html.escape(_compact(maximum))}</text>
+    <text x="8" y="{top + plot_height}" font-size="11" fill="#52616b">{html.escape(_compact(minimum))}</text>
+    {''.join(polylines)}
+    {''.join(points)}
+    {''.join(labels)}
+  </svg>
+  {legend}
+</div>
+"""
+
+
+def _bar_chart_svg(title: str, rows: list[dict]) -> str:
+    rows = rows or []
+    values = [
+        float(row[key])
+        for row in rows
+        for key in ["company", "peer"]
+        if row.get(key) is not None
+    ]
+    if not rows or not values:
+        return _empty_chart_svg(title)
+
+    width = 920
+    height = 280
+    left = 64
+    right = 22
+    top = 22
+    bottom = 56
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+    maximum = max(values) or 1
+    group_width = plot_width / max(len(rows), 1)
+    bar_width = min(32, group_width / 4)
+
+    bars = []
+    labels = []
+    for index, row in enumerate(rows):
+        center = left + group_width * index + group_width / 2
+        labels.append(
+            f'<text x="{center:.1f}" y="{height - 20}" text-anchor="middle" font-size="11" fill="#52616b">{html.escape(str(row.get("metric", "")))}</text>'
+        )
+        for offset, key, color in [(-bar_width / 1.7, "company", "#15616d"), (bar_width / 1.7, "peer", "#f0b429")]:
+            value = row.get(key)
+            if value is None:
+                continue
+            bar_height = float(value) / maximum * plot_height
+            x = center + offset - bar_width / 2
+            y = top + plot_height - bar_height
+            bars.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_width:.1f}" height="{bar_height:.1f}" fill="{color}" rx="3" />'
+            )
+
+    return f"""
+<div class="chart-panel">
+  <div class="chart-title">{html.escape(title)}</div>
+  <svg viewBox="0 0 {width} {height}" width="100%" height="280" role="img" aria-label="{html.escape(title)}">
+    <line x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}" stroke="#d9e2e5" />
+    <line x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}" stroke="#d9e2e5" />
+    <text x="8" y="{top + 8}" font-size="11" fill="#52616b">{html.escape(_compact(maximum))}</text>
+    {''.join(bars)}
+    {''.join(labels)}
+  </svg>
+  {_legend([("company", "Company", "#15616d"), ("peer", "Cluster peers", "#f0b429")])}
+</div>
+"""
+
+
+def _empty_chart_svg(title: str) -> str:
+    return f"""
+<div class="chart-panel">
+  <div class="chart-title">{html.escape(title)}</div>
+  <p class="meta">No chart data available.</p>
+</div>
+"""
+
+
+def _legend(series: list[tuple[str, str, str]]) -> str:
+    items = "".join(
+        f'<span><i class="swatch" style="background:{color}"></i>{html.escape(label)}</span>'
+        for _, label, color in series
+    )
+    return f'<div class="legend">{items}</div>'
+
+
+def _compact(value: float) -> str:
+    value = float(value)
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:.1f}M"
+    if abs(value) >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return f"{value:.1f}"
 
 
 def _html_rows(rows: list[tuple[str, str, str]]) -> str:

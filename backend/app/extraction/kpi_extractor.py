@@ -35,11 +35,50 @@ FORECAST_REQUIRED_FIELDS = [
 
 EXTRACTION_SYSTEM_PROMPT = """You extract ESG/BRSR KPI data from PDF context.
 Return only valid JSON. Do not invent values. If a value is not supported by the
-context, return null and add a short warning. Extract every fiscal year that
-contains scope 1, scope 2, water, or waste evidence into yearly_records, and use
-the latest fiscal year as the top-level KPI fields. Normalize units to:
-tCO2e for emissions, kL for water, tonnes for waste, integer year for
-fiscal_year_start. Keep sector and sub_sector as short business labels."""
+context, return null and add a short warning. Extract every fiscal year column
+that appears in KPI tables into yearly_records. If a table has FY 2024-25 and
+FY 2023-24 columns, return two yearly_records. If a KPI is present for one year
+but missing for another, keep that missing KPI as null for that year. Use the
+latest fiscal year as the top-level KPI fields. Normalize emissions to tCO2e,
+water to the same numeric unit shown in the BRSR table, waste to tonnes, and
+fiscal_year_start to the first year in the fiscal year label. Keep sector and
+sub_sector as short business labels."""
+
+
+CONTEXT_METRIC_PATTERNS = [
+    (
+        "scope1_tco2e",
+        r"t\s*otal\s+scope\s*1\s+emissions?",
+        r"(?:t\s*co\s*2\s*e|mtco2e|metric\s+tonnes?\s+of\s+co\s*2\s+equivalent)",
+        "total Scope 1 emissions",
+    ),
+    (
+        "scope2_tco2e",
+        r"t\s*otal\s+scope\s*2\s+emissions?",
+        r"(?:t\s*co\s*2\s*e|mtco2e|metric\s+tonnes?\s+of\s+co\s*2\s+equivalent)",
+        "total Scope 2 emissions",
+    ),
+    (
+        "water_consumption_kl",
+        r"t\s*otal\s+volume\s+of\s+water\s+consumption",
+        r"(?:mn\s*l|k\s*l|kilolit(?:re|er)s?)",
+        "total water consumption",
+    ),
+    (
+        "waste_generated_tonnes",
+        r"t\s*otal\s*\(\s*a\s*\+\s*b\s*\+\s*c\s*\+\s*d\s*\+\s*e\s*\+\s*f\s*\+\s*g\s*\+\s*h\s*\)",
+        None,
+        "total waste generated",
+    ),
+    (
+        "waste_recycled_tonnes",
+        r"(?:\(\s*i\s*\)\s*)?recycled",
+        None,
+        "waste recycled",
+    ),
+]
+
+FISCAL_YEAR_PATTERN = re.compile("FY\\s*(20\\d{2})\\s*[-/\\u2013\\u2014]\\s*(\\d{2,4})", flags=re.IGNORECASE)
 
 
 def build_extraction_prompt(context: str, detected_years: list[str], target_years: list[str]) -> str:
@@ -121,20 +160,76 @@ class KpiExtractor:
         except ValidationError as exc:
             extracted = ExtractedKpiPayload(warnings=[f"LLM JSON failed validation: {exc}"])
 
+        extracted = self._augment_with_context_yearly_records(extracted, context)
         extracted = self._normalize_totals(extracted)
         quality = score_extraction(extracted)
         return extracted, quality, payload
 
+    def _augment_with_context_yearly_records(
+        self,
+        extracted: ExtractedKpiPayload,
+        context: str,
+    ) -> ExtractedKpiPayload:
+        supplements = _extract_context_yearly_records(context)
+        if not supplements:
+            return extracted
+
+        heuristic_mode = any("heuristic extraction" in warning.lower() for warning in extracted.warnings)
+        by_year = {
+            record.fiscal_year_start: record
+            for record in extracted.yearly_records
+            if record.fiscal_year_start is not None
+        }
+        changed_fields: list[str] = []
+
+        for supplement in supplements:
+            if supplement.fiscal_year_start is None:
+                continue
+            record = by_year.get(supplement.fiscal_year_start)
+            if record is None:
+                record = YearlyKpiRecord(
+                    fiscal_year=supplement.fiscal_year,
+                    fiscal_year_start=supplement.fiscal_year_start,
+                )
+                extracted.yearly_records.append(record)
+                by_year[supplement.fiscal_year_start] = record
+
+            if not record.fiscal_year:
+                record.fiscal_year = supplement.fiscal_year
+
+            for field in FORECAST_REQUIRED_FIELDS:
+                if field in {"company_name", "fiscal_year_start"}:
+                    continue
+                value = getattr(supplement, field, None)
+                if value is None:
+                    continue
+
+                existing = getattr(record, field, None)
+                evidence_exists = bool(record.evidence.get(field))
+                if existing is None or heuristic_mode or not evidence_exists:
+                    setattr(record, field, value)
+                    if supplement.evidence.get(field):
+                        record.evidence[field] = supplement.evidence[field]
+                    changed_fields.append(f"{supplement.fiscal_year_start}.{field}")
+
+        if changed_fields:
+            extracted.warnings.append(
+                "Context table safety net added or corrected yearly KPI fields: "
+                + ", ".join(sorted(set(changed_fields)))
+            )
+        return extracted
+
     def _normalize_totals(self, extracted: ExtractedKpiPayload) -> ExtractedKpiPayload:
-        if extracted.total_scope1_scope2_tco2e is None:
-            if extracted.scope1_tco2e is not None and extracted.scope2_tco2e is not None:
-                extracted.total_scope1_scope2_tco2e = extracted.scope1_tco2e + extracted.scope2_tco2e
+        if extracted.scope1_tco2e is not None and extracted.scope2_tco2e is not None:
+            extracted.total_scope1_scope2_tco2e = extracted.scope1_tco2e + extracted.scope2_tco2e
 
         for record in extracted.yearly_records:
-            if record.total_scope1_scope2_tco2e is None:
-                if record.scope1_tco2e is not None and record.scope2_tco2e is not None:
-                    record.total_scope1_scope2_tco2e = record.scope1_tco2e + record.scope2_tco2e
+            if record.scope1_tco2e is not None and record.scope2_tco2e is not None:
+                record.total_scope1_scope2_tco2e = record.scope1_tco2e + record.scope2_tco2e
 
+        extracted.yearly_records = [
+            record for record in extracted.yearly_records if _record_has_any_kpi(record)
+        ]
         extracted.yearly_records = sorted(
             extracted.yearly_records,
             key=lambda record: record.fiscal_year_start or 0,
@@ -145,8 +240,8 @@ class KpiExtractor:
             latest_record = max(extracted.yearly_records, key=lambda record: record.fiscal_year_start or 0)
 
         if latest_record and latest_record.fiscal_year_start:
-            extracted.fiscal_year = extracted.fiscal_year or latest_record.fiscal_year
-            extracted.fiscal_year_start = extracted.fiscal_year_start or latest_record.fiscal_year_start
+            extracted.fiscal_year = latest_record.fiscal_year or extracted.fiscal_year
+            extracted.fiscal_year_start = latest_record.fiscal_year_start
             for field in [
                 "scope1_tco2e",
                 "scope2_tco2e",
@@ -155,7 +250,7 @@ class KpiExtractor:
                 "waste_recycled_tonnes",
                 "total_scope1_scope2_tco2e",
             ]:
-                if getattr(extracted, field) is None:
+                if getattr(latest_record, field) is not None:
                     setattr(extracted, field, getattr(latest_record, field))
 
         if not extracted.yearly_records and extracted.fiscal_year_start:
@@ -211,6 +306,279 @@ class KpiExtractor:
             "missing_fields": [],
             "warnings": ["Heuristic extraction was used."],
         }
+
+
+def _extract_context_yearly_records(context: str) -> list[YearlyKpiRecord]:
+    flat = _flatten_context(context)
+    by_year: dict[int, YearlyKpiRecord] = {}
+
+    for field, label_pattern, unit_pattern, evidence_label in CONTEXT_METRIC_PATTERNS:
+        for year, value, evidence in _extract_metric_values(flat, label_pattern, unit_pattern, evidence_label):
+            record = by_year.setdefault(
+                year,
+                YearlyKpiRecord(
+                    fiscal_year=_format_fiscal_year(year),
+                    fiscal_year_start=year,
+                    evidence={},
+                ),
+            )
+            if getattr(record, field, None) is None:
+                setattr(record, field, value)
+                record.evidence[field] = evidence
+
+    for inline_record in _extract_inline_yearly_records(flat):
+        if inline_record.fiscal_year_start is None:
+            continue
+        record = by_year.setdefault(
+            inline_record.fiscal_year_start,
+            YearlyKpiRecord(
+                fiscal_year=inline_record.fiscal_year,
+                fiscal_year_start=inline_record.fiscal_year_start,
+                evidence={},
+            ),
+        )
+        for field in [
+            "scope1_tco2e",
+            "scope2_tco2e",
+            "water_consumption_kl",
+            "waste_generated_tonnes",
+            "waste_recycled_tonnes",
+        ]:
+            value = getattr(inline_record, field, None)
+            if value is not None and getattr(record, field, None) is None:
+                setattr(record, field, value)
+                record.evidence[field] = inline_record.evidence.get(field, "Inline yearly KPI summary in context.")
+
+    records = sorted(by_year.values(), key=lambda record: record.fiscal_year_start or 0)
+    for record in records:
+        if record.total_scope1_scope2_tco2e is None and record.scope1_tco2e is not None and record.scope2_tco2e is not None:
+            record.total_scope1_scope2_tco2e = record.scope1_tco2e + record.scope2_tco2e
+    return records
+
+
+def _extract_metric_values(
+    flat_context: str,
+    label_pattern: str,
+    unit_pattern: str | None,
+    evidence_label: str,
+) -> list[tuple[int, float, str]]:
+    values: list[tuple[int, float, str]] = []
+    for match in re.finditer(label_pattern, flat_context, flags=re.IGNORECASE):
+        prefix = flat_context[max(0, match.start() - 700) : match.start()]
+        years = _header_years(prefix)
+        if not years:
+            continue
+
+        row_text = flat_context[match.end() : match.end() + 420]
+        if _is_bad_metric_row(label_pattern, row_text):
+            continue
+
+        if unit_pattern:
+            unit_match = re.search(unit_pattern, row_text, flags=re.IGNORECASE)
+            if not unit_match:
+                continue
+            value_text = _truncate_metric_value_text(row_text[unit_match.end() :])
+        else:
+            if not _is_valid_unitless_context(evidence_label, flat_context, match.start()):
+                continue
+            value_text = _truncate_metric_value_text(row_text, max_chars=140)
+
+        numeric_tokens = [
+            token
+            for token in _number_tokens(value_text)
+            if _valid_metric_value(evidence_label, token)
+        ]
+        if len(numeric_tokens) < len(years):
+            continue
+
+        for fiscal_year, numeric_value in zip(years, numeric_tokens):
+            page = _page_reference(flat_context, match.start())
+            evidence = f"{page}: {evidence_label} for {_format_fiscal_year(fiscal_year)} found in KPI table."
+            values.append((fiscal_year, numeric_value, evidence))
+
+    return values
+
+
+def _truncate_metric_value_text(text: str, max_chars: int = 240) -> str:
+    stop_patterns = [
+        r"\bTotal\s+Scope\s+\d",
+        r"\bTotal\s+Scope\s+1\s+and\s+Scope\s+2",
+        r"\bWater\s+intensity\b",
+        r"\bWaste\s+intensity\b",
+        r"\bFor\s+each\s+category\b",
+        r"\bNote\s*:",
+        r"\bIndicate\s+if\b",
+        r"##\s*PAGE\s+\d+",
+        r"\bAnnual\s+Report\b",
+        r"\bFinancial\s+Statements\b",
+        r"\bStatutory\s+Reports\b",
+    ]
+    limited = text[:max_chars]
+    stops = [
+        match.start()
+        for pattern in stop_patterns
+        if (match := re.search(pattern, limited, flags=re.IGNORECASE))
+    ]
+    if stops:
+        limited = limited[: min(stops)]
+    return limited
+
+
+def _is_bad_metric_row(label_pattern: str, row_text: str) -> bool:
+    row_start = row_text[:120].lower()
+    first_number = re.search(r"(?<![A-Za-z0-9])-?\d", row_start)
+    for bad_phrase in ("per rupee", "/ revenue", "adjusted for"):
+        position = row_start.find(bad_phrase)
+        if position >= 0 and (first_number is None or position < first_number.start()):
+            return True
+    if "scope" in label_pattern.lower() and "scope 1 and scope 2" in row_start:
+        return True
+    return False
+
+
+def _is_valid_unitless_context(evidence_label: str, flat_context: str, index: int) -> bool:
+    window = flat_context[max(0, index - 900) : index + 220].lower()
+    if evidence_label == "total waste generated":
+        return "waste" in window
+    if evidence_label == "waste recycled":
+        return "waste recovered through recycling" in window or (
+            "category of waste" in window and "waste generated" in window
+        )
+    return True
+
+
+def _valid_metric_value(evidence_label: str, value: float) -> bool:
+    if value < 0:
+        return False
+    if evidence_label in {"total Scope 1 emissions", "total Scope 2 emissions"} and 0 < value < 0.01:
+        return False
+    return True
+
+
+def _extract_inline_yearly_records(flat_context: str) -> list[YearlyKpiRecord]:
+    pattern = re.compile(
+        r"\b(20\d{2})\s*:\s*scope\s*1\s+(?P<scope1>[-\d,.\s]+?)"
+        r"\s+scope\s*2\s+(?P<scope2>[-\d,.\s]+?)"
+        r"\s+total\s+emissions\s+(?P<total>[-\d,.\s]+?)"
+        r"\s+water\s+(?P<water>[-\d,.\s]+?)"
+        r"\s+waste\s+(?P<waste>[-\d,.\s]+?)"
+        r"\s+recycled\s+(?P<recycled>[-\d,.\s]+?)(?=\s+\d{4}\s*:|\s+Cluster|\s+Forecast|\s+Peer|\s*$)",
+        flags=re.IGNORECASE,
+    )
+    records: list[YearlyKpiRecord] = []
+    for match in pattern.finditer(flat_context):
+        year = _safe_int(match.group(1))
+        if year is None:
+            continue
+        page = _page_reference(flat_context, match.start())
+        record = YearlyKpiRecord(
+            fiscal_year=_format_fiscal_year(year),
+            fiscal_year_start=year,
+            scope1_tco2e=_first_number(match.group("scope1")),
+            scope2_tco2e=_first_number(match.group("scope2")),
+            total_scope1_scope2_tco2e=_first_number(match.group("total")),
+            water_consumption_kl=_first_number(match.group("water")),
+            waste_generated_tonnes=_first_number(match.group("waste")),
+            waste_recycled_tonnes=_first_number(match.group("recycled")),
+            evidence={},
+        )
+        for field in [
+            "scope1_tco2e",
+            "scope2_tco2e",
+            "total_scope1_scope2_tco2e",
+            "water_consumption_kl",
+            "waste_generated_tonnes",
+            "waste_recycled_tonnes",
+        ]:
+            if getattr(record, field, None) is not None:
+                record.evidence[field] = f"{page}: inline yearly KPI summary."
+        records.append(record)
+    return records
+
+
+def _header_years(prefix: str) -> list[int]:
+    header_start = max(prefix.lower().rfind("parameter"), prefix.lower().rfind("unit"))
+    header = prefix[header_start:] if header_start >= 0 else prefix
+    years = _fiscal_years_in_order(header)
+    if not years:
+        years = _fiscal_years_in_order(prefix)
+    return years[-4:]
+
+
+def _fiscal_years_in_order(text: str) -> list[int]:
+    years: list[int] = []
+    seen: set[int] = set()
+    for match in FISCAL_YEAR_PATTERN.finditer(text):
+        year = _safe_int(match.group(1))
+        if year is not None and year not in seen:
+            years.append(year)
+            seen.add(year)
+    return years
+
+
+def _number_tokens(text: str) -> list[float]:
+    tokens: list[float] = []
+    for match in re.finditer(r"(?<![A-Za-z0-9])-?\d[\d,]*(?:\.\d+)?", text):
+        value = _safe_number(match.group(0))
+        if value is not None:
+            tokens.append(value)
+    return tokens
+
+
+def _first_number(text: str) -> float | None:
+    values = _number_tokens(text)
+    return values[0] if values else None
+
+
+def _safe_number(value: str) -> float | None:
+    cleaned = re.sub(r"[^0-9.\-]", "", value)
+    if cleaned in {"", "-"}:
+        return None
+    try:
+        numeric = float(cleaned)
+    except ValueError:
+        return None
+    if numeric < 0:
+        return None
+    return numeric
+
+
+def _record_has_any_kpi(record: YearlyKpiRecord) -> bool:
+    return any(
+        getattr(record, field, None) is not None
+        for field in [
+            "scope1_tco2e",
+            "scope2_tco2e",
+            "water_consumption_kl",
+            "waste_generated_tonnes",
+            "waste_recycled_tonnes",
+            "total_scope1_scope2_tco2e",
+        ]
+    )
+
+
+def _safe_int(value: str | int | None) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_fiscal_year(start_year: int) -> str:
+    return f"FY {start_year}-{str(start_year + 1)[-2:]}"
+
+
+def _flatten_context(context: str) -> str:
+    return re.sub(r"\s+", " ", context).strip()
+
+
+def _page_reference(flat_context: str, index: int) -> str:
+    page_markers = list(re.finditer(r"##\s*PAGE\s+(\d+)", flat_context[:index], flags=re.IGNORECASE))
+    if not page_markers:
+        return "PDF context"
+    return f"page {page_markers[-1].group(1)}"
 
 
 def score_extraction(extracted: ExtractedKpiPayload) -> ExtractionQuality:

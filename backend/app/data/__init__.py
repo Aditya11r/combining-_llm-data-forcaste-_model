@@ -1,1 +1,1 @@
-"""CSV and future database access."""
+"""Reference data access for CSV fallback and database-backed peers."""

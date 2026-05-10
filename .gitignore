@@ -210,6 +210,12 @@ frontend/dist/
 # Local runtime data
 backend/runtime/
 
+# Local model and CSV artifacts
+backend/artifacts/models/*
+backend/artifacts/data/*
+!backend/artifacts/models/.gitkeep
+!backend/artifacts/data/.gitkeep
+
 # Ruff stuff:
 .ruff_cache/
 
