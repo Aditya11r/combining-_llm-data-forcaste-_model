@@ -454,6 +454,7 @@ export default function App() {
               setZoom={setBenchmarkZoom}
               clusterId={result?.cluster?.KMeans_cluster}
               peerSampleSize={result?.peer_comparison?.sample_row_count}
+              cluster={result?.cluster}
             />
             <YearlyKpiTrendsCard
               hasData={hasTrendChart}
@@ -619,7 +620,7 @@ function EmissionsForecastCard({ hasData, rows, rawRowCount, zoom, setZoom, resu
             <LineChart data={rows}>
               <CartesianGrid stroke="#edf0f2" vertical={false} />
               <XAxis dataKey="year" axisLine={false} tickLine={false} />
-              <YAxis axisLine={false} tickLine={false} width={58} />
+              <YAxis axisLine={false} tickLine={false} width={76} tickFormatter={formatAxisTick} />
               <Tooltip />
               <Legend />
               <Line type="monotone" dataKey="company" stroke="#15616d" strokeWidth={3} dot={{ r: 3 }} connectNulls />
@@ -688,14 +689,17 @@ function ExtractedKpiPreviewCard({ hasYearlyKpis, trendRows, kpiRows, kpiIsEmpty
       )}
       {imputationCount > 0 && (
         <div className="kpi-source-note">
-          {imputationCount} missing model-input value{imputationCount === 1 ? '' : 's'} estimated from CSV-grounded references.
+          {imputationCount} missing model-input value{imputationCount === 1 ? '' : 's'} estimated from reference-grounded data.
         </div>
       )}
     </article>
   );
 }
 
-function ClusterPeerBenchmarkCard({ hasData, rows, rawRowCount, zoom, setZoom, clusterId, peerSampleSize }) {
+function ClusterPeerBenchmarkCard({ hasData, rows, rawRowCount, zoom, setZoom, clusterId, peerSampleSize, cluster }) {
+  const warnings = Array.isArray(cluster?.input_warnings) ? cluster.input_warnings : [];
+  const visibleWarnings = warnings.filter((warning) => warning !== cluster?.explanation);
+
   return (
     <article className="chart-card benchmark-card">
       <CardHeader
@@ -713,7 +717,7 @@ function ClusterPeerBenchmarkCard({ hasData, rows, rawRowCount, zoom, setZoom, c
             <BarChart data={rows}>
               <CartesianGrid stroke="#edf0f2" vertical={false} />
               <XAxis dataKey="metric" axisLine={false} tickLine={false} />
-              <YAxis axisLine={false} tickLine={false} width={58} />
+              <YAxis axisLine={false} tickLine={false} width={76} tickFormatter={formatAxisTick} />
               <Tooltip />
               <Legend />
               <Bar dataKey="company" fill="#15616d" radius={[4, 4, 0, 0]} />
@@ -724,6 +728,16 @@ function ClusterPeerBenchmarkCard({ hasData, rows, rawRowCount, zoom, setZoom, c
           <ChartEmpty title="No benchmark yet" body="Cluster peers appear after the analysis completes." />
         )}
       </div>
+      {cluster?.explanation && (
+        <div className={`cluster-debug-note ${cluster?.confidence === 'low' || warnings.length ? 'warning' : ''}`}>
+          {cluster.explanation}
+        </div>
+      )}
+      {visibleWarnings.map((warning) => (
+        <div className="cluster-debug-note warning" key={warning}>
+          {warning}
+        </div>
+      ))}
     </article>
   );
 }
@@ -742,7 +756,7 @@ function YearlyKpiTrendsCard({ hasData, rows, rawRowCount, zoom, setZoom, yearCo
             <LineChart data={rows}>
               <CartesianGrid stroke="#edf0f2" vertical={false} />
               <XAxis dataKey="year" axisLine={false} tickLine={false} />
-              <YAxis axisLine={false} tickLine={false} width={58} />
+              <YAxis axisLine={false} tickLine={false} width={76} tickFormatter={formatAxisTick} />
               <Tooltip />
               <Legend />
               <Line type="monotone" dataKey="total_emissions" name="Total emissions" stroke="#15616d" strokeWidth={3} connectNulls />
@@ -870,4 +884,18 @@ function clamp(value, min, max) {
 function formatNumber(value) {
   if (value === null || value === undefined) return '-';
   return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function formatAxisTick(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value;
+  const absolute = Math.abs(numeric);
+  if (absolute >= 1_000_000_000) return `${trimAxisNumber(numeric / 1_000_000_000)}B`;
+  if (absolute >= 1_000_000) return `${trimAxisNumber(numeric / 1_000_000)}M`;
+  if (absolute >= 1_000) return `${trimAxisNumber(numeric / 1_000)}K`;
+  return trimAxisNumber(numeric);
+}
+
+function trimAxisNumber(value) {
+  return Number(value.toFixed(value >= 10 ? 0 : 1)).toLocaleString();
 }

@@ -72,6 +72,11 @@ class ClusteringService:
             confidence = _confidence_from_distances(distances, cluster_id)
 
         label = self.peer_store.cluster_label(cluster_id)
+        explanation = (
+            "Cluster was predicted from the latest model-input KPIs. "
+            f"Geographic footprint inputs included states_served={_fmt_input(payload.states_served)} "
+            f"and countries_served={_fmt_input(payload.countries_served)}."
+        )
         return ClusterResult(
             KMeans_cluster=cluster_id,
             KMeans_cluster_label=label,
@@ -79,6 +84,7 @@ class ClusteringService:
             peer_group=cluster_id,
             confidence=confidence,
             distances=distances,
+            explanation=explanation,
         )
 
     def fallback_from_peer_group(self, peer_group: int) -> ClusterResult:
@@ -89,6 +95,8 @@ class ClusteringService:
             peer_group=peer_group,
             confidence="low",
             distances=[],
+            explanation="Clustering model fallback was used, so cluster confidence is low.",
+            input_warnings=["KMeans prediction did not complete; default peer group fallback was used."],
         )
 
     def _validate_payload(self, payload: ClusteringInput) -> None:
@@ -133,3 +141,11 @@ def _confidence_from_distances(distances: list[float], cluster_id: int) -> str:
     if margin >= 0.12:
         return "medium"
     return "low"
+
+
+def _fmt_input(value: float | str | None) -> str:
+    if value is None:
+        return "not available"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)

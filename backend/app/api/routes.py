@@ -20,10 +20,20 @@ from app.report.chart_builder import build_charts
 from app.report.chat import ConsultantChatService, make_chat_message
 from app.report.consultant import ConsultantReporter
 from app.report.exporter import build_report_html, build_simple_pdf
-from app.schemas import AnalysisResponse, ChatRequest, ChatResponse, HealthResponse
+from app.schemas import (
+    AnalysisResponse,
+    ChatRequest,
+    ChatResponse,
+    ClusterResult,
+    ExtractedKpiPayload,
+    ExtractionQuality,
+    HealthResponse,
+)
 from app.sessions.store import SessionStore
 
 router = APIRouter()
+
+HIGH_RISK_CLUSTER_FIELDS = {"states_served", "countries_served"}
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -151,6 +161,8 @@ async def analyze_pdf(
         except Exception as exc:
             cluster = clustering.fallback_from_peer_group(0)
             quality.notes.append(f"Clustering model fallback used: {exc}")
+
+        _annotate_cluster_input_reliability(cluster, extracted, quality)
 
         forecasting_inputs = extracted.to_forecasting_inputs(peer_group=cluster.peer_group)
         peer_comparison = peer_store.peer_comparison(cluster.peer_group, extracted=extracted, sample_size=100)
@@ -290,6 +302,82 @@ def safe_filename(filename: str) -> str:
         else:
             allowed.append("_")
     return "".join(allowed) or "report.pdf"
+
+
+def _annotate_cluster_input_reliability(
+    cluster: ClusterResult,
+    extracted: ExtractedKpiPayload,
+    quality: ExtractionQuality,
+) -> None:
+    geo_values = {
+        "states_served": extracted.states_served,
+        "countries_served": extracted.countries_served,
+    }
+    geo_text = ", ".join(f"{field}={_fmt_cluster_input(value)}" for field, value in geo_values.items())
+    imputed_geo_fields = sorted(
+        {
+            field.field
+            for field in extracted.imputed_fields
+            if field.fiscal_year_start is None and field.field in HIGH_RISK_CLUSTER_FIELDS
+        }
+    )
+    missing_geo_fields = sorted(
+        field for field, value in geo_values.items() if value in (None, "")
+    )
+    unevidenced_geo_fields = sorted(
+        field
+        for field, value in geo_values.items()
+        if value not in (None, "") and not extracted.evidence.get(field)
+    )
+
+    if imputed_geo_fields or missing_geo_fields or unevidenced_geo_fields:
+        cluster.confidence = "low"
+        reasons: list[str] = []
+        if imputed_geo_fields:
+            reasons.append(
+                f"{', '.join(imputed_geo_fields)} "
+                "were imputed, not directly extracted from the PDF"
+            )
+        if missing_geo_fields:
+            reasons.append(f"{', '.join(missing_geo_fields)} were missing")
+        if unevidenced_geo_fields:
+            reasons.append(f"{', '.join(unevidenced_geo_fields)} had no PDF evidence quote")
+
+        message = (
+            f"This cluster was influenced by {geo_text}. "
+            f"{'; '.join(reasons)}, so cluster confidence was downgraded to low."
+        )
+        cluster.explanation = message
+        _append_once(cluster.input_warnings, message)
+
+        imputation_basis = "; ".join(
+            f"{field.field}: {field.basis}"
+            for field in extracted.imputed_fields
+            if field.fiscal_year_start is None and field.field in imputed_geo_fields
+        )
+        if imputation_basis:
+            _append_once(cluster.input_warnings, f"Geography imputation basis: {imputation_basis}")
+        _append_once(quality.notes, message)
+        return
+
+    cluster.explanation = (
+        f"This cluster was influenced by states_served={_fmt_cluster_input(extracted.states_served)} "
+        f"and countries_served={_fmt_cluster_input(extracted.countries_served)}, along with emissions, "
+        "water, waste, sector, and sub-sector inputs. The geography fields were not marked as imputed."
+    )
+
+
+def _fmt_cluster_input(value: float | str | None) -> str:
+    if value is None or value == "":
+        return "not available"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _append_once(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
 
 
 def _store_source(store) -> str:

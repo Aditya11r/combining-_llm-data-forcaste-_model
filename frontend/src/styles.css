@@ -262,7 +262,7 @@ body.resizing-chat {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 188px;
+  max-height: 16rem;
   overflow: auto;
   padding-right: 2px;
 }
@@ -335,7 +335,7 @@ body.resizing-chat {
 }
 
 .system-card {
-  margin-top: 10rem;
+  margin-top: 3rem;
   border-top: 1px solid #edf0f2;
   padding-top: 12px;
 }
@@ -832,7 +832,8 @@ body.resizing-chat {
 }
 
 .kpi-empty-note,
-.kpi-source-note {
+.kpi-source-note,
+.cluster-debug-note {
   margin: 0 16px 14px;
   border-radius: 8px;
   padding: 10px 12px;
@@ -850,6 +851,18 @@ body.resizing-chat {
   color: #1f5f46;
   background: #ecfdf3;
   border: 1px solid #abefc6;
+}
+
+.cluster-debug-note {
+  color: #314154;
+  background: #f8fafc;
+  border: 1px solid #d8e0e8;
+}
+
+.cluster-debug-note.warning {
+  color: #7a3410;
+  background: #fff7ed;
+  border-color: #fed7aa;
 }
 
 .thread-panel {
@@ -1713,6 +1726,18 @@ body.resizing-chat .resize-divider::before {
   color: #065f46;
   background: #ecfdf3;
   border: 1px solid #abefc6;
+}
+
+.cluster-debug-note {
+  color: #274255;
+  background: #f8fafc;
+  border: 1px solid #d7e4dc;
+}
+
+.cluster-debug-note.warning {
+  color: #7a3410;
+  background: #fff7ed;
+  border-color: #fed7aa;
 }
 
 .kpi-empty-note {

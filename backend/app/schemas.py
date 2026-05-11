@@ -159,6 +159,8 @@ class ClusterResult(BaseModel):
     peer_group: int
     confidence: Literal["low", "medium", "high"] = "medium"
     distances: list[float] = Field(default_factory=list)
+    explanation: str | None = None
+    input_warnings: list[str] = Field(default_factory=list)
 
 
 class ForecastPoint(BaseModel):

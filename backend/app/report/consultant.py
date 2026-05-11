@@ -25,7 +25,9 @@ when multiple fiscal years are present, discuss direction of change, volatility,
 and whether the forecast is based on one year or a multi-year sequence.
 Recommendations must be evidence-based: tie each recommendation to at least one
 of these supplied inputs: multi-year KPI trend, same-cluster peer benchmark,
-forecast direction, extraction quality, or missing fields."""
+forecast direction, extraction quality, missing fields, or cluster input
+warnings. If cluster confidence is low because geography fields were imputed,
+say that clearly and avoid overclaiming peer-group certainty."""
 
 
 class ConsultantReporter:
@@ -119,7 +121,8 @@ Analysis data:
             ),
             cluster_interpretation=(
                 f"The assigned KMeans cluster is {cluster.KMeans_cluster}. "
-                f"The peer set is selected from companies mapped to that same cluster."
+                f"The peer set is selected from companies mapped to that same cluster. "
+                f"{cluster.explanation or ''}"
             ),
             forecast_interpretation=(
                 f"The next forecast point is {first_forecast} tCO2e, using "
